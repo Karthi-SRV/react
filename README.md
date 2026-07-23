@@ -4,16 +4,7 @@ A self-contained React + Vite app demonstrating the access-token/refresh-token
 pattern, with a **mocked backend** (no server needed — everything runs in the
 browser). Access tokens expire after **5 minutes**.
 
-## Open in StackBlitz
-
-1. Go to https://stackblitz.com and choose "Create new project" → "Vite" (or
-   just "Import from GitHub" if you push this folder to a repo).
-2. Copy every file in this folder into the StackBlitz project, keeping the
-   same paths (`src/mockApi/...`, `src/auth/...`, `src/api/...`).
-3. It installs and runs automatically. Sign in with the pre-filled demo
-   credentials (`demo@example.com` / `password123`).
-
-Or run locally:
+run locally:
 ```
 npm install
 npm run dev
