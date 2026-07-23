@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { AuthProvider, useAuth } from './auth/AuthContext';
-import { msUntilExpiry } from './mockApi/tokens';
-import * as server from './mockApi/server';
+import { useTokenCountdown } from './hooks/useTokenCountdown';
+import DashboardPage from './pages/DashboardPage';
+import ReportPage from './pages/ReportPage';
 
 function LoginForm() {
   const { login, status } = useAuth();
@@ -45,48 +46,18 @@ function LoginForm() {
 
 function TokenCountdown() {
   const { accessToken } = useAuth();
-  const [remaining, setRemaining] = useState(msUntilExpiry(accessToken));
-
-  useEffect(() => {
-    setRemaining(msUntilExpiry(accessToken));
-    const id = setInterval(() => setRemaining(msUntilExpiry(accessToken)), 1000);
-    return () => clearInterval(id);
-  }, [accessToken]);
-
-  const seconds = Math.ceil(remaining / 1000);
-  const mm = String(Math.floor(seconds / 60)).padStart(2, '0');
-  const ss = String(seconds % 60).padStart(2, '0');
+  const { label, isExpired, isHot } = useTokenCountdown(accessToken);
 
   return (
-    <span className={`countdown ${seconds <= 15 ? 'countdown-hot' : ''}`}>
-      {seconds > 0 ? `${mm}:${ss} until access token expires` : 'access token expired'}
+    <span className={`countdown ${isHot ? 'countdown-hot' : ''}`}>
+      {isExpired ? 'access token expired' : `${label} until access token expires`}
     </span>
   );
 }
 
-function Dashboard() {
-  const { user, logout, callProtected, forceExpireAccessToken, log } = useAuth();
-  const [profile, setProfile] = useState(null);
-  const [fetching, setFetching] = useState(false);
-  const [error, setError] = useState(null);
-
-  async function loadProfile() {
-    setFetching(true);
-    setError(null);
-    try {
-      const data = await callProtected((accessToken) => server.getProfile(accessToken));
-      setProfile(data);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setFetching(false);
-    }
-  }
-
-  useEffect(() => {
-    loadProfile();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+function Shell() {
+  const { user, logout, forceExpireAccessToken, log } = useAuth();
+  const [tab, setTab] = useState('dashboard');
 
   return (
     <div className="card wide">
@@ -100,19 +71,19 @@ function Dashboard() {
 
       <TokenCountdown />
 
-      <div className="row">
-        <button onClick={loadProfile} disabled={fetching}>
-          {fetching ? 'Calling protected endpoint…' : 'Call protected endpoint'}
+      <div className="tabs">
+        <button className={`tab ${tab === 'dashboard' ? 'tab-active' : ''}`} onClick={() => setTab('dashboard')}>
+          Dashboard
         </button>
-        <button className="secondary" onClick={forceExpireAccessToken}>
+        <button className={`tab ${tab === 'report' ? 'tab-active' : ''}`} onClick={() => setTab('report')}>
+          Report
+        </button>
+        <button className="secondary force-expire" onClick={forceExpireAccessToken}>
           Force-expire access token
         </button>
       </div>
 
-      {error && <p className="error">{error}</p>}
-      {profile && (
-        <pre className="profile">{JSON.stringify(profile, null, 2)}</pre>
-      )}
+      {tab === 'dashboard' ? <DashboardPage /> : <ReportPage />}
 
       <h2>Event log</h2>
       <ul className="log">
@@ -122,21 +93,23 @@ function Dashboard() {
       </ul>
 
       <p className="hint">
-        Try "Force-expire access token", then "Call protected endpoint" — you'll see the
-        request fail with 401, refresh silently, and retry automatically. Or just wait
-        5 minutes and watch the silent refresh fire on its own.
+        Try "Force-expire access token" then switch tabs (or hit reload) — the Dashboard's
+        5 parallel calls all 401 together but trigger exactly one refresh; the Report's
+        single call takes the same path with just one. Reload the whole page and you'll
+        stay logged in too — the refresh token restores the session automatically. Or
+        just wait 5 minutes and watch the silent refresh fire on its own.
       </p>
     </div>
   );
 }
 
 function Screen() {
-  const { status, accessToken } = useAuth();
+  const { accessToken, restoring } = useAuth();
 
-  if (status === 'loading' && !accessToken) {
+  if (restoring) {
     return <div className="card"><p>Restoring session…</p></div>;
   }
-  return accessToken ? <Dashboard /> : <LoginForm />;
+  return accessToken ? <Shell /> : <LoginForm />;
 }
 
 export default function App() {

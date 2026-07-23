@@ -5,8 +5,12 @@ import * as server from '../mockApi/server';
 // should trigger exactly one refresh call, not five.
 let pendingRefresh = null;
 
-function doRefresh(refreshToken, onTokens) {
+function doRefresh(refreshToken, onTokens, onRefreshTriggered) {
   if (!pendingRefresh) {
+    // This is the moment a NEW refresh call actually starts. If 5 requests
+    // all land here within the same tick, only the first one gets past
+    // `!pendingRefresh` — the other 4 just await the same promise below.
+    onRefreshTriggered?.();
     pendingRefresh = server
       .refresh(refreshToken)
       .then((tokens) => {
@@ -31,6 +35,7 @@ export async function authorizedRequest({
   getRefreshToken,
   onTokens,
   onAuthFailure,
+  onRefreshTriggered,
   _isRetry = false,
 }) {
   try {
@@ -40,7 +45,7 @@ export async function authorizedRequest({
     if (!isAuthError || _isRetry) throw err;
 
     try {
-      const newAccessToken = await doRefresh(getRefreshToken(), onTokens);
+      const newAccessToken = await doRefresh(getRefreshToken(), onTokens, onRefreshTriggered);
       return await requestFn(newAccessToken);
     } catch (refreshErr) {
       onAuthFailure();

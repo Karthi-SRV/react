@@ -1,7 +1,8 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useState } from 'react';
 import * as server from '../mockApi/server';
-import { msUntilExpiry } from '../mockApi/tokens';
 import { authorizedRequest } from '../api/authClient';
+import { useRefreshScheduler } from '../hooks/useRefreshScheduler';
+import { useSessionRestore } from '../hooks/useSessionRestore';
 
 const AuthContext = createContext(null);
 
@@ -13,26 +14,19 @@ const AuthContext = createContext(null);
 //   should live in an httpOnly, Secure, SameSite cookie set by the server,
 //   so client-side JS (and any XSS payload) can never read it at all.
 const REFRESH_STORAGE_KEY = 'demo_refresh_token';
-
-// Refresh a little before actual expiry so an in-flight request never races
-// against the clock.
-const REFRESH_SKEW_MS = 15_000;
+const getStoredRefreshToken = () => localStorage.getItem(REFRESH_STORAGE_KEY);
 
 export function AuthProvider({ children }) {
   const [accessToken, setAccessToken] = useState(null);
   const [user, setUser] = useState(null);
-  const [status, setStatus] = useState('idle'); // idle | loading | authenticated | error
+  const [status, setStatus] = useState('idle'); // idle | authenticated | error
   const [log, setLog] = useState([]);
-  const refreshTimerRef = useRef(null);
 
   const addLog = useCallback((message) => {
     setLog((prev) => [{ time: new Date().toLocaleTimeString(), message }, ...prev].slice(0, 12));
   }, []);
 
-  const getRefreshToken = () => localStorage.getItem(REFRESH_STORAGE_KEY);
-
   const clearSession = useCallback((reason) => {
-    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     localStorage.removeItem(REFRESH_STORAGE_KEY);
     setAccessToken(null);
     setUser(null);
@@ -44,19 +38,10 @@ export function AuthProvider({ children }) {
     setAccessToken(tokens.accessToken);
     localStorage.setItem(REFRESH_STORAGE_KEY, tokens.refreshToken);
     if (nextUser) setUser(nextUser);
-    scheduleRefresh(tokens.accessToken);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const scheduleRefresh = useCallback((token) => {
-    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-    const delay = Math.max(0, msUntilExpiry(token) - REFRESH_SKEW_MS);
-    refreshTimerRef.current = setTimeout(() => {
-      silentRefresh();
-    }, delay);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   const silentRefresh = useCallback(async () => {
-    const currentRefreshToken = getRefreshToken();
+    const currentRefreshToken = getStoredRefreshToken();
     if (!currentRefreshToken) return;
     try {
       const tokens = await server.refresh(currentRefreshToken);
@@ -67,24 +52,24 @@ export function AuthProvider({ children }) {
     }
   }, [addLog, applyTokens, clearSession]);
 
-  // On mount: if a refresh token survived a page reload, use it to get a
-  // fresh access token instead of forcing the user to log in again.
-  useEffect(() => {
-    const existing = getRefreshToken();
-    if (!existing) return;
-    setStatus('loading');
-    server
-      .refresh(existing)
-      .then((tokens) => {
-        applyTokens(tokens, tokens.user);
-        setStatus('authenticated');
-        addLog('Restored session from stored refresh token');
-      })
-      .catch(() => clearSession());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Re-arms itself on every accessToken change (login, refresh, retry) —
+  // this is the "stay logged in" heartbeat while the tab stays open.
+  useRefreshScheduler(accessToken, silentRefresh);
 
-  useEffect(() => () => refreshTimerRef.current && clearTimeout(refreshTimerRef.current), []);
+  // Runs once on mount. If a refresh token survived a page reload, this
+  // exchanges it for a fresh access token so reloading the page never logs
+  // the user out — the access token itself doesn't survive a reload (it
+  // only ever lived in memory), only the refresh token does.
+  const restoring = useSessionRestore(getStoredRefreshToken, async (token) => {
+    try {
+      const tokens = await server.refresh(token);
+      applyTokens(tokens, tokens.user);
+      setStatus('authenticated');
+      addLog('Restored session from stored refresh token');
+    } catch {
+      clearSession();
+    }
+  });
 
   const login = useCallback(async (email, password) => {
     setStatus('loading');
@@ -100,26 +85,29 @@ export function AuthProvider({ children }) {
   }, [applyTokens, addLog]);
 
   const logout = useCallback(async () => {
-    const token = getRefreshToken();
+    const token = getStoredRefreshToken();
     if (token) await server.logout(token).catch(() => {});
     clearSession('Logged out');
   }, [clearSession]);
 
-  // Any protected call in the app should go through this so a 401 (expired
-  // access token) transparently triggers a refresh-and-retry.
+  // The single choke point every protected API call must go through: it
+  // attaches the current access token, and on a 401 transparently
+  // refreshes once (deduped across concurrent callers) and retries.
   const callProtected = useCallback((requestFn) =>
     authorizedRequest({
       requestFn,
       getAccessToken: () => accessToken,
-      getRefreshToken,
+      getRefreshToken: getStoredRefreshToken,
       onTokens: (tokens) => applyTokens(tokens, tokens.user),
       onAuthFailure: () => clearSession('Session expired — please log in again'),
-    }), [accessToken, applyTokens, clearSession]);
+      onRefreshTriggered: () => addLog('401 received → refreshing token (deduped for concurrent calls)'),
+    }), [accessToken, applyTokens, clearSession, addLog]);
 
   const value = {
     accessToken,
     user,
     status,
+    restoring,
     log,
     login,
     logout,

@@ -63,7 +63,15 @@ export async function login(email, password) {
   };
 }
 
+// Counts every time the /refresh endpoint is actually hit — used to prove
+// that 5 parallel 401s on the dashboard only cause ONE real network refresh.
+let refreshCallCount = 0;
+export function getRefreshCallCount() {
+  return refreshCallCount;
+}
+
 export async function refresh(refreshToken) {
+  refreshCallCount += 1;
   await delay(networkJitter());
 
   const record = refreshStore.get(refreshToken);
@@ -107,22 +115,62 @@ export async function logout(refreshToken) {
   if (record) revokeFamily(record.familyId);
 }
 
-// A protected resource that only responds to a valid, unexpired access token.
-export async function getProfile(accessToken) {
-  await delay(networkJitter());
-
+function assertValidAccessToken(accessToken, label) {
   const payload = decodeToken(accessToken);
   if (!payload || payload.type !== 'access' || isExpired(accessToken)) {
-    const err = new Error('Access token invalid or expired');
+    const err = new Error(`${label}: access token invalid or expired`);
     err.status = 401;
     throw err;
   }
+  return payload;
+}
 
+// A protected resource that only responds to a valid, unexpired access token.
+export async function getProfile(accessToken) {
+  await delay(networkJitter());
+  const payload = assertValidAccessToken(accessToken, 'Profile');
   const user = USERS.find((u) => u.id === payload.sub);
   return {
     id: user.id,
     email: user.email,
     name: user.name,
     serverTime: new Date().toISOString(),
+  };
+}
+
+// ----- dashboard widgets (5 independent endpoints, called in parallel) ----
+
+const WIDGET_BUILDERS = {
+  revenue: () => ({ label: 'Revenue today', value: `$${(12000 + Math.random() * 3000).toFixed(0)}` }),
+  users: () => ({ label: 'Active users', value: Math.floor(800 + Math.random() * 200) }),
+  orders: () => ({ label: 'Orders today', value: Math.floor(50 + Math.random() * 40) }),
+  traffic: () => ({ label: 'Requests / min', value: Math.floor(300 + Math.random() * 150) }),
+  alerts: () => ({ label: 'Open alerts', value: Math.floor(Math.random() * 5) }),
+};
+
+export const WIDGET_IDS = Object.keys(WIDGET_BUILDERS);
+
+// Each widget is its own "endpoint" — it independently validates the access
+// token it's handed, exactly like a separate microservice would.
+export async function getWidget(widgetId, accessToken) {
+  await delay(networkJitter());
+  assertValidAccessToken(accessToken, widgetId);
+  return { id: widgetId, ...WIDGET_BUILDERS[widgetId](), fetchedAt: new Date().toLocaleTimeString() };
+}
+
+// ----- report page (1 endpoint) -------------------------------------------
+
+export async function getReport(accessToken) {
+  await delay(networkJitter());
+  assertValidAccessToken(accessToken, 'Report');
+  return {
+    title: 'Monthly summary report',
+    generatedAt: new Date().toLocaleTimeString(),
+    rows: [
+      { metric: 'Total revenue', value: '$482,300' },
+      { metric: 'New signups', value: '1,204' },
+      { metric: 'Churn rate', value: '2.1%' },
+      { metric: 'Avg. session length', value: '6m 42s' },
+    ],
   };
 }
